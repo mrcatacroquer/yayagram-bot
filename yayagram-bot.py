@@ -26,12 +26,35 @@ STATUS = False
 
 CONFIG_FILE = 'yayagram.conf'
 CONFIG = ConfigParser()
+PRINTER = None
+UPDATER = None
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
+
+def process_yayagram_message_command(update: Update, context: CallbackContext) -> None:
+    PRINTER.setSize('S')
+    PRINTER.println("--------------------------------")
+    PRINTER.setSize('L')
+    PRINTER.println("De " + str(msg.peer.first_name) + ":")
+
+    lines = messageText.split("\n")
+    lists = (textwrap.TextWrapper(width=32,break_long_words=False).wrap(line) for line in lines)
+    messageToPrint  = "\n".join("\n".join(list) for list in lists)
+
+    PRINTER.setSize('M')
+    PRINTER.println()
+    PRINTER.println(clean_str(messageToPrint))
+    PRINTER.setSize('S')
+    PRINTER.println("--------------------------------")
+
+    PRINTER.setDefault()
+    PRINTER.feed(2)
+
+    update.message.reply_text(CONFIG['global']['THANK_YOU_FOR_MSG'])
 
 def start_command(update: Update, context: CallbackContext) -> None:
     """Send a message when the command /start is issued."""
@@ -158,7 +181,7 @@ def is_user_admin(update: Update, context: CallbackContext):
 
     return True
 
-def echo(update: Update, context: CallbackContext) -> None:
+def test_command(update: Update, context: CallbackContext) -> None:
     """Echo the user message."""
     textbody = "chatid:" + str(update.effective_chat.id)
     update.message.reply_text(update.message.text)
@@ -182,9 +205,8 @@ def send_recording(updater, destination, filetosend):
     updater.bot.send_document(chat_id=destination, document=open(filetosend, 'rb'))
 
 def send_broadcast(updater, filetosend):
-    print("Send broadcast")
+    LOGGER.info("Sending broadcast")
     for x in range(int(CONFIG['destinations']['DST_MAX'])):
-        print (str(x))
         if not CONFIG.has_option('destinations', 'DST' + str(x) + '_TGID'):
             continue
 
@@ -219,11 +241,11 @@ def get_yayagram_destination():
         if not (GPIO.input(int(CONFIG['destinations']['DST' + str(x) + '_PIN']))):
             continue
 
-        print("The " + CONFIG['destinations']['DST' + str(x) + '_NAME'] +" switch is ON")
+        LOGGER.info("The " + CONFIG['destinations']['DST' + str(x) + '_NAME'] +" switch is ON")
         return CONFIG['destinations']['DST' + str(x) + '_TGID']
 
     if (GPIO.input(int(CONFIG['destinations']['ALL_PIN']))):
-        print("The ALL_PIN input is ON")
+        LOGGER.info("The ALL_PIN input is ON")
         return int(CONFIG['destinations']['ALL_PIN'])
 
 def load_config() -> None:
@@ -315,8 +337,6 @@ def setup_pins() -> None:
     GPIO.output(int(CONFIG['recording']['RECORDING_LED_PIN']),GPIO.LOW)
 
 def status_worker() -> None:
-    global STOP_TG
-    global STATUS
     while not STOP_TG:
         GPIO.output(int(CONFIG['global']['STATUS_LED_PIN']),GPIO.HIGH)
         time.sleep(1)
@@ -324,7 +344,8 @@ def status_worker() -> None:
             GPIO.output(int(CONFIG['global']['STATUS_LED_PIN']),GPIO.LOW)
         time.sleep(1)
 
-def sender_worker(updater) -> None:
+def sender_worker() -> None:
+    global STOP_TG
     while not STOP_TG:
         if (GPIO.input(int(CONFIG['recording']['RECORD_BUTTON_PIN'])) == 0):
             time.sleep(0.30)
@@ -338,34 +359,38 @@ def sender_worker(updater) -> None:
         except Exception as e:
             print_exception(e)
             GPIO.output(int(CONFIG['recording']['RECORDING_LED_PIN']),GPIO.LOW)
+            STOP_TG = True
 
 def print_exception(e) -> None:
     if hasattr(e, 'message'):
-        print("Exception sending message" + e.message)
+        LOGGER.fatal("Exception sending message" + e.message)
     else:
-        print("Exception sending message" + str(e))
+        LOGGER.fatal("Exception sending message" + str(e))
 
 def main() -> None:
     global STOP_TG
+    global PRINTER
+    global UPDATER
 
-    print("Loading config")
+    LOGGER.info("Loading config")
     load_config()
 
-    print ("Doing pins setup")
+    LOGGER.info("Doing pins setup")
     setup_pins()
 
-    print("Creating Status thread")
+    LOGGER.info("Creating Status thread")
     status_thread = threading.Thread(target=status_worker)
     status_thread.setName("TheStatusThread")
     status_thread.daemon = True
     status_thread.start()
 
-    print ("Start the bot")
+    LOGGER.info("Starting the bot")
+    UPDATER = Updater(TOKEN)
 
-    updater = Updater(TOKEN)
+    dispatcher = UPDATER.dispatcher
 
-    dispatcher = updater.dispatcher
-
+    LOGGER.info("Registering commands")
+    dispatcher.add_handler(CommandHandler("test", test_command))
     dispatcher.add_handler(CommandHandler("start", start_command))
     dispatcher.add_handler(CommandHandler("end", end_command))
     dispatcher.add_handler(CommandHandler("help", help_command))
@@ -376,33 +401,40 @@ def main() -> None:
     dispatcher.add_handler(CommandHandler("addme", addme_command))
     dispatcher.add_handler(CommandHandler("removeme", removeme_command))
 
-    message_handler = MessageHandler(Filters.text & ~Filters.command, echo)
+    message_handler = MessageHandler(Filters.text & ~Filters.command, process_yayagram_message_command)
     dispatcher.add_handler(message_handler)
 
-    print("Creating Sender thread")
-    sender_thread = threading.Thread(target=sender_worker, args=(updater,))
+    LOGGER.info("Creating Sender thread")
+    sender_thread = threading.Thread(target=sender_worker)
     sender_thread.setName("TheSenderThread")
     sender_thread.daemon = True
     sender_thread.start()
 
-    print("Start polliing")
-    updater.start_polling()
+    LOGGER.info("Start polling")
+    UPDATER.start_polling()
+
+    LOGGER.info("Creating the printer")
+    PRINTER = Adafruit_Thermal(
+        CONFIG['printer']['ADDR'],
+        CONFIG['printer']['BAUDRATE'],
+        timeout=5)
 
     if CONFIG.has_option('admin', 'ADMIN_ID'):
-        updater.bot.send_message(int(CONFIG['admin']['ADMIN_ID']), text="Yayagram up!")
+        UPDATER.bot.send_message(int(CONFIG['admin']['ADMIN_ID']), text="Yayagram up!")
     STATUS = True
 
-    updater.idle()
-
-    STOP_TG = True
-
-    print("Waiting for sender thread")
-    sender_thread.join()
-    print("Waiting for status thread")
+    LOGGER.info("Going idle")
     status_thread.join()
+    LOGGER.info("Status thread done.")
+    sender_thread.join()
+    LOGGER.info("Sender thread done.")
+
     GPIO.output(int(CONFIG['global']['STATUS_LED_PIN']),GPIO.LOW)
 
-    print("Bye")
+    LOGGER.info("Stoping updater")
+    UPDATER.stop()
+
+    LOGGER.info("Bye")
 
 if __name__ == '__main__':
     main()
