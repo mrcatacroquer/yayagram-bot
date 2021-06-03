@@ -65,12 +65,15 @@ def printboard_command(update: Update, context: CallbackContext) -> None:
 
 def addmeasroot_command(update: Update, context: CallbackContext) -> None:
     if CONFIG.has_option('admin', 'ADMIN_ID'):
-        sender.send_msg(msg.peer.cmd, 'Sorry, this Yayagram already has an owner')
+        update.message.reply_text("Sorry, this Yayagram already has an owner")
+        context.bot.send_message(chat_id=CONFIG['admin']['ADMIN_ID'],
+            text="The user " + update.effective_user.full_name + "(" +
+            str(update.effective_chat.id) + ") is trying to become admin.")
         return
 
-    CONFIG.set('admin', 'ADMIN_ID', str(msg.peer.cmd))
+    CONFIG.set('admin', 'ADMIN_ID', str(update.effective_chat.id))
     save_config()
-    sender.send_msg(msg.peer.cmd, "Added! You are now the Yayagram owner")
+    update.message.reply_text("Added! You are now the Yayagram owner")
 
 def addme_command(update: Update, context: CallbackContext) -> None:
     pos = -1
@@ -129,28 +132,28 @@ def removeme_command(update: Update, context: CallbackContext) -> None:
         update.message.reply_text("Can't find you at the board")
 
 def lockedits_command(update: Update, context: CallbackContext) -> None:
-    sender.send_msg(msg.peer.cmd, "Locking the Yayagram board")
-    if not is_user_admin(sender,msg):
+    update.message.reply_text("Locking the Yayagram board")
+    if not is_user_admin(update, context):
         return
 
     CONFIG.set('admin', 'ADMIN_LOCK', 'True')
     save_config()
-    sender.send_msg(msg.peer.cmd, "Done.")
+    update.message.reply_text("Done.")
 
 def unlockedits_command(update: Update, context: CallbackContext) -> None:
-    sender.send_msg(msg.peer.cmd, "Unlocking the Yayagram board")
+    update.message.reply_text("Unlocking the Yayagram board")
     if not is_user_admin(sender,msg):
         return
 
     CONFIG.set('admin', 'ADMIN_LOCK', 'False')
     save_config()
-    sender.send_msg(msg.peer.cmd, "Done.")
+    update.message.reply_text("Done.")
 
 def is_user_admin(update: Update, context: CallbackContext):
-    if msg.sender.id != CONFIG['admin']['ADMIN_ID']:
+    if update.effective_chat.id != CONFIG['admin']['ADMIN_ID']:
         reply = u"You are not my Admin.\nMy Admin has id {admin_id} but you have {user_id}".format(
-            admin_id=CONFIG['admin']['ADMIN_ID'], user_id=msg.sender.id)
-        sender.send_msg(msg.sender.cmd, reply)
+            admin_id=CONFIG['admin']['ADMIN_ID'], user_id=update.effective_chat.id)
+        update.message.reply_text(reply)
         return False
 
     return True
@@ -165,6 +168,63 @@ def echo(update: Update, context: CallbackContext) -> None:
     #context.bot.send_message(chat_id=sei_chat_id, text="Hola Sei, desde manu")
     context.bot.send_message(chat_id=manu_chat_id, text="Hola Manu, desde manu, mandando wav")
     message = context.bot.send_document(chat_id=manu_chat_id, document=open('opusfile.opus', 'rb'))
+
+def send_recording(updater, destination, filetosend):
+    if (os.path.isfile(filetosend) == False):
+        updater.bot.send_message(chat_id=destination, text=CONFIG['recording']['RECORDING_SEND_ERROR_MSG'])
+        return
+
+    if (destination == int(CONFIG['destinations']['ALL_PIN'])):
+        send_broadcast(updater, filetosend)
+        return
+
+    updater.bot.send_message(chat_id=destination, text=CONFIG['global']['NEW_MSG_FOR_YOU'])
+    updater.bot.send_document(chat_id=destination, document=open(filetosend, 'rb'))
+
+def send_broadcast(updater, filetosend):
+    print("Send broadcast")
+    for x in range(int(CONFIG['destinations']['DST_MAX'])):
+        print (str(x))
+        if not CONFIG.has_option('destinations', 'DST' + str(x) + '_TGID'):
+            continue
+
+        destination_user_id = CONFIG['destinations']['DST' + str(x) + '_TGID']
+        message = CONFIG['global']['BROADCAST_MESSAGE']
+
+        updater.bot.send_message(chat_id=destination_user_id, text=message)
+        updater.bot.send_document(chat_id=destination_user_id,  document=open(filetosend, 'rb'))
+
+def do_recording():
+    GPIO.output(int(CONFIG['recording']['RECORDING_LED_PIN']),GPIO.HIGH)
+    fileName = CONFIG['recording']['RECORDINGS_PATH'] + str(uuid.uuid4()) + ".wav"
+    command = CONFIG['recording']['ARECORD_PATH'] + " -D plughw:" + CONFIG['recording']['PLUG_HW'] + " --format=S16_LE --rate=16000 --file-type=wav " + fileName
+    popen_cmd = shlex.split(command)
+    pro = subprocess.Popen(popen_cmd, stdout=subprocess.PIPE, shell=False, preexec_fn=os.setsid)
+
+    while (GPIO.input(int(CONFIG['recording']['RECORD_BUTTON_PIN']))):
+        time.sleep(0.30)
+
+    os.killpg(os.getpgid(pro.pid), signal.SIGTERM)
+
+    GPIO.output(int(CONFIG['recording']['RECORDING_LED_PIN']),GPIO.LOW)
+
+    time.sleep(0.30)
+
+    return fileName
+
+def get_yayagram_destination():
+    for x in range(int(CONFIG['destinations']['DST_MAX'])):
+        if not CONFIG.has_option('destinations', 'DST' + str(x) + '_TGID'):
+            continue
+        if not (GPIO.input(int(CONFIG['destinations']['DST' + str(x) + '_PIN']))):
+            continue
+
+        print("The " + CONFIG['destinations']['DST' + str(x) + '_NAME'] +" switch is ON")
+        return CONFIG['destinations']['DST' + str(x) + '_TGID']
+
+    if (GPIO.input(int(CONFIG['destinations']['ALL_PIN']))):
+        print("The ALL_PIN input is ON")
+        return int(CONFIG['destinations']['ALL_PIN'])
 
 def load_config() -> None:
     CONFIG.read(CONFIG_FILE)
@@ -264,6 +324,21 @@ def status_worker() -> None:
             GPIO.output(int(CONFIG['global']['STATUS_LED_PIN']),GPIO.LOW)
         time.sleep(1)
 
+def sender_worker(updater) -> None:
+    while not STOP_TG:
+        if (GPIO.input(int(CONFIG['recording']['RECORD_BUTTON_PIN'])) == 0):
+            time.sleep(0.30)
+            continue
+
+        try:
+            destination = get_yayagram_destination()
+            filename=do_recording()
+            send_recording(updater, destination, filename)
+            os.remove(filename)
+        except Exception as e:
+            print_exception(e)
+            GPIO.output(int(CONFIG['recording']['RECORDING_LED_PIN']),GPIO.LOW)
+
 def print_exception(e) -> None:
     if hasattr(e, 'message'):
         print("Exception sending message" + e.message)
@@ -304,14 +379,25 @@ def main() -> None:
     message_handler = MessageHandler(Filters.text & ~Filters.command, echo)
     dispatcher.add_handler(message_handler)
 
+    print("Creating Sender thread")
+    sender_thread = threading.Thread(target=sender_worker, args=(updater,))
+    sender_thread.setName("TheSenderThread")
+    sender_thread.daemon = True
+    sender_thread.start()
+
+    print("Start polliing")
     updater.start_polling()
 
+    if CONFIG.has_option('admin', 'ADMIN_ID'):
+        updater.bot.send_message(int(CONFIG['admin']['ADMIN_ID']), text="Yayagram up!")
     STATUS = True
 
     updater.idle()
 
     STOP_TG = True
 
+    print("Waiting for sender thread")
+    sender_thread.join()
     print("Waiting for status thread")
     status_thread.join()
     GPIO.output(int(CONFIG['global']['STATUS_LED_PIN']),GPIO.LOW)
